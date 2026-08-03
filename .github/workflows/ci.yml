@@ -73,7 +73,7 @@ jobs:
         # (blocked by a repository ruleset). The count may go up, never down.
         run: |
           FLOOR=$(jq -r '.count' .ratchet/test-count.json)
-          ACTUAL=$(npx vitest list --reporter=json 2>/dev/null | jq '[.testModules[].tests[]] | length')
+          ACTUAL=$(npx vitest list 2>/dev/null | grep -c ' > ' || true)
           echo "floor=$FLOOR actual=$ACTUAL"
           if [ "$ACTUAL" -lt "$FLOOR" ]; then
             echo "::error::Test count fell from $FLOOR to $ACTUAL"
