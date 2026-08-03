@@ -53,12 +53,20 @@ jobs:
       # measure. These measure whether it cheated.
 
       - name: No skipped or focused tests
+        if: github.event_name == 'pull_request'
         run: |
-          if git diff --name-only origin/main...HEAD -- '**/*.test.*' '**/*.spec.*' \
-             | xargs -r grep -nE '\.skip\(|\.todo\(|\.only\(|xit\(|xdescribe\(' ; then
+          FILES=$(git diff --name-only origin/main...HEAD -- '**/*.test.*' '**/*.spec.*')
+          if [ -z "$FILES" ]; then
+            echo "No test files changed."
+            exit 0
+          fi
+          HITS=$(echo "$FILES" | xargs grep -nE '\.skip\(|\.todo\(|\.only\(|xit\(|xdescribe\(' || true)
+          if [ -n "$HITS" ]; then
+            echo "$HITS"
             echo "::error::A test was skipped, focused, or marked todo"
             exit 1
           fi
+          echo "Clean."
 
       - name: Test-count ratchet
         # .ratchet/test-count.json is committed and the agent cannot edit it
