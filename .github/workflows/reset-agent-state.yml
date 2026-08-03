@@ -1,0 +1,66 @@
+# One-tap recovery, from the Actions tab on your phone.
+#
+# After any kill, state is dirty: issues stuck on agent:running, orphaned
+# branches, half-open PRs. A queued run can fire the instant you re-enable the
+# agent, so clean up BEFORE flipping AGENT_ENABLED back to true.
+#
+# A written checklist is not phone-friendly and will not get followed at 23:00.
+# This is that checklist, as a button.
+
+name: Reset agent state
+
+on:
+  workflow_dispatch:
+    inputs:
+      close_prs:
+        description: "Also close open agent PRs and delete their branches"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Requeue stuck issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          STUCK=$(gh issue list --state open --label agent:running \
+                    --json number --jq '.[].number')
+          if [ -z "$STUCK" ]; then echo "Nothing stuck."; else
+            for N in $STUCK; do
+              echo "Requeueing #$N"
+              gh issue edit "$N" --remove-label agent:running --add-label agent:ready
+              gh issue comment "$N" --body "Agent state was reset; returned to the queue."
+            done
+          fi
+
+      - name: Close orphaned PRs
+        if: inputs.close_prs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr list --state open --json number,headRefName \
+            --jq '.[] | select(.headRefName | startswith("agent/")) | .number' \
+          | while read -r P; do
+              echo "Closing PR #$P"
+              gh pr close "$P" --delete-branch \
+                --comment "Closed by agent state reset."
+            done
+
+      - name: Report
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "### Agent state after reset" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ready:   $(gh issue list --state open --label agent:ready   --json number --jq 'length')" >> "$GITHUB_STEP_SUMMARY"
+          echo "- running: $(gh issue list --state open --label agent:running --json number --jq 'length')" >> "$GITHUB_STEP_SUMMARY"
+          echo "- blocked: $(gh issue list --state open --label agent:blocked --json number --jq 'length')" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Now confirm main is green, then set AGENT_ENABLED=true." >> "$GITHUB_STEP_SUMMARY"

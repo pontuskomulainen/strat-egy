@@ -1,0 +1,73 @@
+# Dead-man's switch.
+#
+# The worst failure mode is silence: the workflow got auto-disabled, the token
+# expired, the cron never fired, the run hung until timeout and was cancelled
+# rather than failed. None of those produce a failure alert. This does.
+#
+# Runs daily, independent of AGENT_ENABLED - if you deliberately paused the
+# agent, close the issue it opens. That takes one tap and confirms you're alive.
+
+name: Dead-man's switch
+
+on:
+  schedule:
+    - cron: "17 6 * * *"     # 09:17 Finland - lands before your morning review
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  actions: read
+
+env:
+  OWNER: pontuskomulainen               # <-- your GitHub username
+  MAX_SILENCE_HOURS: 36
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Alert if no agent run has succeeded recently
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          LAST=$(gh run list --repo "$REPO" --workflow agent.yml \
+                   --status success --limit 1 --json updatedAt \
+                   --jq '.[0].updatedAt // empty')
+
+          if [ -z "$LAST" ]; then
+            AGE_H=999
+            DETAIL="No successful agent run has ever been recorded."
+          else
+            AGE_H=$(( ( $(date +%s) - $(date -d "$LAST" +%s) ) / 3600 ))
+            DETAIL="Last successful agent run: $LAST (${AGE_H}h ago)."
+          fi
+
+          echo "$DETAIL"
+          if [ "$AGE_H" -lt "$MAX_SILENCE_HOURS" ]; then exit 0; fi
+
+          # Don't spam - one open alert at a time is enough.
+          EXISTING=$(gh issue list --repo "$REPO" --state open \
+                       --label agent:alert --search "in:title silent" \
+                       --json number --jq 'length')
+          if [ "$EXISTING" -gt 0 ]; then
+            echo "Alert already open."
+            exit 0
+          fi
+
+          gh issue create --repo "$REPO" \
+            --title "Agent has been silent for ${AGE_H}h" \
+            --label agent:alert \
+            --assignee "$OWNER" \
+            --body "$DETAIL
+
+          Check, in order:
+          1. Is AGENT_ENABLED still 'true'? (Settings -> Variables)
+          2. Was the workflow auto-disabled? Public repos disable scheduled
+             workflows after 60 days of repo inactivity.
+          3. Has CLAUDE_CODE_OAUTH_TOKEN expired? Re-run \`claude setup-token\`.
+          4. Are 3+ agent PRs open? The review-backlog guard pauses the loop.
+          5. Is main red?
+
+          If you paused the agent on purpose, just close this."

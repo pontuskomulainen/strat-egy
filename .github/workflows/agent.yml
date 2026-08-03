@@ -1,0 +1,295 @@
+# The agent loop.
+#
+# BEFORE USING: replace OWNER on the `env:` line below with your GitHub username.
+#
+# PHASE 1: leave the `schedule:` block commented out until one manual
+# workflow_dispatch run has gone green end to end. A cron firing at 02:17
+# against an untested workflow is how you wake up to forty red PRs.
+
+name: Agent loop
+
+on:
+  # Cron is UTC and ignores DST. 23:17 UTC = 02:17 in Finland (summer), 01:17 (winter).
+  # schedule:
+  #   - cron: "17 23 * * *"    # nightly build run
+  #   - cron: "17 1 * * *"     # PHASE 2 ONLY: second run, same 5-hour window
+  workflow_dispatch:           # the "run it now" button — works from the phone
+
+# Never let two runs overlap. cancel-in-progress:false means a second run queues
+# rather than killing the first; killing mid-run leaves labels in a dirty state.
+concurrency:
+  group: agent-loop
+  cancel-in-progress: false
+
+# permissions is ALL-OR-NOTHING: any scope you don't list is set to `none`.
+# Forget `issues: write` and the failure-alert step silently loses the ability
+# to open the issue that tells you it failed.
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  OWNER: pontuskomulainen                 # <-- your GitHub username
+
+jobs:
+  agent:
+    # KILL SWITCH. Settings -> Secrets and variables -> Actions -> Variables ->
+    # AGENT_ENABLED = false stops every future run in about 30 seconds,
+    # from a mobile browser.
+    if: vars.AGENT_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25        # set it explicitly; don't rely on the default
+
+    steps:
+      # ---------------------------------------------------------------
+      # PREFLIGHT - no Claude, no tokens spent.
+      # Everything that can fail cheaply must fail here.
+      # ---------------------------------------------------------------
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # need full history for origin/main...HEAD diffs
+
+      - name: Assert ANTHROPIC_API_KEY is absent
+        # The footgun: if this env var exists, Claude Code uses it INSTEAD of the
+        # subscription and bills per token. The grep is the load-bearing half -
+        # the var can only reach the runner if a workflow file put it there.
+        run: |
+          if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::ANTHROPIC_API_KEY is set - this would bill per token"
+            exit 1
+          fi
+          if grep -rl 'ANTHROPIC_API_KEY' .github/workflows/ | grep -v 'agent.yml'; then
+            echo "::error::A workflow file references ANTHROPIC_API_KEY"
+            exit 1
+          fi
+          echo "Clean - subscription auth only."
+
+      - name: Check main is green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          STATUS=$(gh run list --workflow ci.yml --branch main --limit 1 \
+                     --json conclusion --jq '.[0].conclusion // "none"')
+          if [ "$STATUS" = "failure" ]; then
+            echo "::error::main is red - fix it before the agent builds on top of it"
+            exit 1
+          fi
+
+      - name: Review-backlog guard
+        # THE ANTI-ABANDONMENT MECHANISM. If 3+ unreviewed agent PRs are already
+        # open, stop queueing work. A stalled loop with 3 open PRs is
+        # recoverable; 30 is the pile people abandon. Costs zero tokens.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          OPEN=$(gh pr list --state open --json headRefName \
+                   --jq '[.[] | select(.headRefName | startswith("agent/"))] | length')
+          echo "Open agent PRs: $OPEN"
+          if [ "$OPEN" -ge 3 ]; then
+            echo "::notice::$OPEN unreviewed PRs - pausing until you catch up."
+            echo "SKIP=true" >> "$GITHUB_ENV"
+          fi
+
+      # ---------------------------------------------------------------
+      # SELECT - deterministic, and still no tokens spent.
+      # ---------------------------------------------------------------
+
+      - name: Select the next issue
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Lowest open issue number with agent:ready, authored by you.
+          # --author is a SECURITY control, not a convenience: on a public repo
+          # anyone can open an issue, and the issue body becomes the prompt.
+          N=$(gh issue list --state open --label agent:ready --author "$OWNER" \
+                --json number --jq 'sort_by(.number) | .[0].number // empty')
+          if [ -z "$N" ]; then
+            echo "::notice::Queue empty - nothing to do."
+            echo "SKIP=true" >> "$GITHUB_ENV"
+          else
+            echo "ISSUE=$N" >> "$GITHUB_ENV"
+            echo "Selected issue #$N"
+          fi
+
+      - name: Attempt guard
+        # Three strikes. Giving up must be cheap, so it happens before Claude runs.
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LABELS=$(gh issue view "$ISSUE" --json labels --jq '.labels[].name')
+          if echo "$LABELS" | grep -q 'agent:attempt-3'; then
+            gh issue edit "$ISSUE" --remove-label agent:ready --add-label agent:blocked
+            gh issue comment "$ISSUE" --body "Gave up after 3 attempts. Needs a human."
+            echo "SKIP=true" >> "$GITHUB_ENV"
+          else
+            K=1
+            echo "$LABELS" | grep -q 'agent:attempt-1' && K=2
+            echo "$LABELS" | grep -q 'agent:attempt-2' && K=3
+            echo "ATTEMPT=$K" >> "$GITHUB_ENV"
+          fi
+
+      - name: Claim the issue
+        # Optimistic lock: flip labels BEFORE Claude starts. agent:running is
+        # invisible to selection, so a queued run can't pick the same issue.
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue edit "$ISSUE" \
+            --remove-label agent:ready \
+            --add-label agent:running \
+            --add-label "agent:attempt-$ATTEMPT"
+
+      - name: Extract the contract
+        # Two machine-readable sections from the issue body:
+        #   a fenced ```acceptance block of shell commands
+        #   a `Files:` line of globs
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue view "$ISSUE" --json body  --jq '.body'  > /tmp/issue.md
+          gh issue view "$ISSUE" --json title --jq '.title' > /tmp/title.txt
+          awk '/^```acceptance$/{f=1;next} /^```$/{f=0} f' /tmp/issue.md > /tmp/acceptance.sh
+          grep '^Files:' /tmp/issue.md | sed 's/^Files:[[:space:]]*//' > /tmp/globs.txt
+          if [ ! -s /tmp/acceptance.sh ] || [ ! -s /tmp/globs.txt ]; then
+            echo "::error::Issue #$ISSUE has no acceptance block or no Files: line"
+            exit 1
+          fi
+          echo "ISSUE_TITLE=$(cat /tmp/title.txt)" >> "$GITHUB_ENV"
+          echo "--- acceptance ---"; cat /tmp/acceptance.sh
+          echo "--- scope ---";      cat /tmp/globs.txt
+
+      - name: Create the branch
+        if: env.SKIP != 'true'
+        run: |
+          git config user.name  "agent"
+          git config user.email "agent@users.noreply.github.com"
+          git switch -c "agent/issue-$ISSUE"
+
+      # ---------------------------------------------------------------
+      # THE ONLY STEP THAT SPENDS TOKENS
+      # ---------------------------------------------------------------
+
+      - name: Run Claude
+        if: env.SKIP != 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # NOTE: v1 has NO max_turns / model / allowed_tools inputs. They all
+          # moved into claude_args. Any blog showing `max_turns: 20` as a `with:`
+          # key is pre-v1 and will silently do nothing.
+          claude_args: >-
+            --model sonnet
+            --effort medium
+            --max-turns 20
+            --allowedTools "Read,Edit,Write,Grep,Glob,Bash(npm run *),Bash(npx vitest *)"
+          prompt: |
+            Implement GitHub issue #${{ env.ISSUE }} in this repository.
+
+            TITLE: ${{ env.ISSUE_TITLE }}
+
+            Read CLAUDE.md first. It is binding.
+
+            Hard rules for this run:
+            - Only edit files matching the globs in the issue's `Files:` line.
+            - Do NOT edit the acceptance block, any workflow file, .ratchet/, or CODEOWNERS.
+            - Do NOT merge anything, do NOT close the issue, do NOT open a PR.
+            - Do NOT weaken, skip, or delete an existing test to make something pass.
+            - If the task is impossible as specified, say so and change nothing.
+
+            Done means every command in the issue's acceptance block exits 0.
+            The harness runs those commands itself after you finish - you cannot
+            self-certify, so don't try.
+
+      # ---------------------------------------------------------------
+      # GATES - run by the harness, never by the model.
+      # A model asked whether it met the criteria will sometimes say yes.
+      # A shell command that exits non-zero cannot.
+      # ---------------------------------------------------------------
+
+      - name: Commit whatever changed
+        # The action may or may not commit on its own - unverified, so handle
+        # both. The real test is "are there commits ahead of main".
+        if: env.SKIP != 'true'
+        run: |
+          git add -A
+          git commit -m "agent: issue #$ISSUE" || true
+          if [ "$(git rev-list --count origin/main..HEAD)" -eq 0 ]; then
+            echo "::error::No commits - the agent changed nothing"
+            exit 1
+          fi
+
+      - name: Gate 1 - acceptance
+        if: env.SKIP != 'true'
+        run: |
+          npm ci
+          bash /tmp/acceptance.sh
+
+      - name: Gate 2 - scope
+        # Anti-drift enforcement. An agent that quietly redefined the task will
+        # have touched files it was never given.
+        if: env.SKIP != 'true'
+        run: |
+          CHANGED=$(git diff --name-only origin/main...HEAD)
+          FAIL=0
+          for f in $CHANGED; do
+            OK=0
+            while read -r g; do
+              [ -z "$g" ] && continue
+              case "$f" in $g) OK=1 ;; esac
+            done < <(tr ',' '\n' < /tmp/globs.txt | sed 's/^ *//;s/ *$//')
+            if [ "$OK" -eq 0 ]; then echo "OUT OF SCOPE: $f"; FAIL=1; fi
+          done
+          exit $FAIL
+
+      - name: Open the PR
+        if: env.SKIP != 'true'
+        env:
+          # PHASE 2: swap this for a GitHub App installation token. PRs opened
+          # with GITHUB_TOKEN get CI parked in an approval-required state, which
+          # means unattended merge is impossible no matter what else you do.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git push -u origin "agent/issue-$ISSUE"
+          gh pr create --base main \
+            --title "agent: $ISSUE_TITLE" \
+            --body "Closes #$ISSUE"
+          # PHASE 2 ONLY - arm auto-merge:
+          # gh pr merge --auto --squash --delete-branch
+
+      - name: Success - hand off
+        if: env.SKIP != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue edit "$ISSUE" --remove-label agent:running --add-label agent:done
+          gh issue comment "$ISSUE" --body "PR opened from \`agent/issue-$ISSUE\`. Run: $RUN_URL"
+
+      # ---------------------------------------------------------------
+      # FAILURE - return the issue to the queue and put it on your phone.
+      # ---------------------------------------------------------------
+
+      - name: Failure - requeue and alert
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -n "${ISSUE:-}" ]; then
+            # the attempt label persists, so the next run is attempt K+1
+            gh issue edit "$ISSUE" --remove-label agent:running --add-label agent:ready
+            gh issue comment "$ISSUE" --body "Attempt ${ATTEMPT:-?} failed. $RUN_URL"
+          fi
+          # Assigned issue = mobile push. The workflow-failure email goes to one
+          # person, is silently reassignable, and is blind to hangs and cancels.
+          gh issue create \
+            --title "Agent run failed${ISSUE:+ on #$ISSUE}" \
+            --body "$RUN_URL" \
+            --label agent:alert \
+            --assignee "$OWNER"

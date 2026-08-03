@@ -1,0 +1,94 @@
+# CI is the agent's only sense organ. Everything it can verify about its own
+# work happens here. Runs on every PR and every push to main.
+#
+# Target: under 4 minutes. If it gets slower, move things to a nightly workflow
+# rather than accepting a slow feedback loop.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      # --- correctness -------------------------------------------------
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        # This includes the no-restricted-globals rule banning Math.random,
+        # Date, performance, setTimeout and the transcendentals inside
+        # src/sim/**. That lint rule is a determinism test and the cheapest
+        # one in the repo.
+        run: npm run lint
+
+      - name: Unit + property tests
+        # Coverage thresholds live in vitest.config.ts and FAIL the run rather
+        # than just printing. A threshold that only prints is decoration.
+        run: npm run test -- --coverage
+
+      # --- anti-gaming -------------------------------------------------
+      # Every check below exists because an agent optimises whatever you
+      # measure. These measure whether it cheated.
+
+      - name: No skipped or focused tests
+        run: |
+          if git diff --name-only origin/main...HEAD -- '**/*.test.*' '**/*.spec.*' \
+             | xargs -r grep -nE '\.skip\(|\.todo\(|\.only\(|xit\(|xdescribe\(' ; then
+            echo "::error::A test was skipped, focused, or marked todo"
+            exit 1
+          fi
+
+      - name: Test-count ratchet
+        # .ratchet/test-count.json is committed and the agent cannot edit it
+        # (blocked by a repository ruleset). The count may go up, never down.
+        run: |
+          FLOOR=$(jq -r '.count' .ratchet/test-count.json)
+          ACTUAL=$(npx vitest list --reporter=json 2>/dev/null | jq '[.testModules[].tests[]] | length')
+          echo "floor=$FLOOR actual=$ACTUAL"
+          if [ "$ACTUAL" -lt "$FLOOR" ]; then
+            echo "::error::Test count fell from $FLOOR to $ACTUAL"
+            exit 1
+          fi
+
+      - name: No-op guard
+        # A PR whose only changes are docs or lockfiles did no work.
+        if: github.event_name == 'pull_request'
+        run: |
+          REAL=$(git diff --name-only origin/main...HEAD \
+                 | grep -vE '^(docs/|\.agent/)|\.md$|lock' | wc -l)
+          if [ "$REAL" -eq 0 ]; then
+            echo "::error::No substantive changes outside docs"
+            exit 1
+          fi
+
+      # --- secrets ------------------------------------------------------
+
+      - name: Secret scan
+        # GitHub's own secret scanning and push protection run on public repos
+        # for free, but anyone with write access can bypass push protection -
+        # and the agent has write access. gitleaks runs regardless.
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
