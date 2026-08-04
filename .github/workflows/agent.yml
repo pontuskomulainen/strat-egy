@@ -205,7 +205,7 @@ jobs:
           claude_args: >-
             --model sonnet
             --effort medium
-            --max-turns 20
+            --max-turns 35
             --allowedTools "Read,Edit,Write,Grep,Glob,Bash"
           prompt: |
             Implement GitHub issue #${{ env.ISSUE }} in this repository.
