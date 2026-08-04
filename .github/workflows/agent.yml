@@ -242,7 +242,7 @@ jobs:
         # both. The real test is "are there commits ahead of main".
         if: env.SKIP != 'true'
         run: |
-          git add -A -- ':!node_modules'
+          git add -A
           git commit -m "agent: issue #$ISSUE" || true
           if [ "$(git rev-list --count origin/main..HEAD)" -eq 0 ]; then
             echo "::error::No commits - the agent changed nothing"
