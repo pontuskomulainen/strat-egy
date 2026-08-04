@@ -274,10 +274,16 @@ jobs:
       - name: Open the PR
         if: env.SKIP != 'true'
         env:
-          # PHASE 2: swap this for a GitHub App installation token. PRs opened
-          # with GITHUB_TOKEN get CI parked in an approval-required state, which
-          # means unattended merge is impossible no matter what else you do.
-          GH_TOKEN: ${{ github.token }}
+          # NOT github.token, deliberately. "Events triggered by the GITHUB_TOKEN
+          # will not create a new workflow run" - so a PR opened with it gets
+          # ZERO checks and ci.yml never fires. Recursion protection, not
+          # configurable, and unrelated to the repo setting that permits Actions
+          # to open PRs at all. AGENT_PAT is a fine-grained PAT scoped to this
+          # repo with Contents:write + Pull requests:write and NOTHING else -
+          # in particular no Workflows:write, so the agent cannot edit
+          # .github/workflows/ and disable deadman.yml, its own kill switch.
+          # See issue #31. The loop is dead until this secret exists.
+          GH_TOKEN: ${{ secrets.AGENT_PAT }}
         run: |
           # claude-code-action revokes its installation token on the way out
           # (curl -X DELETE /installation/token), which kills whatever git
