@@ -2,16 +2,17 @@
 #
 # BEFORE USING: replace OWNER on the `env:` line below with your GitHub username.
 #
-# PHASE 1: leave the `schedule:` block commented out until one manual
-# workflow_dispatch run has gone green end to end. A cron firing at 02:17
-# against an untested workflow is how you wake up to forty red PRs.
+# PHASE 1 is done: run 30942166797 went green end to end on 2026-08-04 and opened
+# PR #34 with CI checks actually attached, so the nightly cron is now armed. Do not
+# arm a cron before a manual dispatch has gone green - that is how you wake up to
+# forty red PRs. AGENT_ENABLED=false is still the way to stop it from a phone.
 
 name: Agent loop
 
 on:
   # Cron is UTC and ignores DST. 23:17 UTC = 02:17 in Finland (summer), 01:17 (winter).
-  # schedule:
-  #   - cron: "17 23 * * *"    # nightly build run
+  schedule:
+    - cron: "17 23 * * *"      # nightly build run
   #   - cron: "17 1 * * *"     # PHASE 2 ONLY: second run, same 5-hour window
   workflow_dispatch:           # the "run it now" button — works from the phone
 
@@ -252,7 +253,13 @@ jobs:
       - name: Gate 1 - acceptance
         if: env.SKIP != 'true'
         run: |
-          bash /tmp/acceptance.sh
+          # -e, not plain `bash`. Without it the script's exit status is only the
+          # LAST command's, so an acceptance block of
+          #   npm run lint / npm run typecheck / npx vitest run ...
+          # passed the gate whenever the vitest line passed, no matter how badly
+          # lint and typecheck failed. Probe: `printf 'false\ntrue\n' | bash` exits 0.
+          # pipefail so a piped acceptance line can't be rescued by its tail either.
+          bash -eo pipefail /tmp/acceptance.sh
 
       - name: Gate 2 - scope
         # Anti-drift enforcement. An agent that quietly redefined the task will
