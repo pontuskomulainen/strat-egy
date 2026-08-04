@@ -181,6 +181,18 @@ jobs:
       # THE ONLY STEP THAT SPENDS TOKENS
       # ---------------------------------------------------------------
 
+      - uses: actions/setup-node@v4
+        if: env.SKIP != 'true'
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        # Claude needs a working node_modules to run lint and tests. Gate 1
+        # ran npm ci only AFTER Claude, so it was working in a bare repo.
+        if: env.SKIP != 'true'
+        run: npm ci
+
       - name: Run Claude
         if: env.SKIP != 'true'
         uses: anthropics/claude-code-action@v1
@@ -241,7 +253,6 @@ jobs:
       - name: Gate 1 - acceptance
         if: env.SKIP != 'true'
         run: |
-          npm ci
           bash /tmp/acceptance.sh
 
       - name: Gate 2 - scope
