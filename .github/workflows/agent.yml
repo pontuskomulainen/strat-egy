@@ -162,6 +162,11 @@ jobs:
             exit 1
           fi
           echo "ISSUE_TITLE=$(cat /tmp/title.txt)" >> "$GITHUB_ENV"
+          {
+            echo 'ISSUE_BODY<<AGENT_EOF'
+            cat /tmp/issue.md
+            echo 'AGENT_EOF'
+          } >> "$GITHUB_ENV"
           echo "--- acceptance ---"; cat /tmp/acceptance.sh
           echo "--- scope ---";      cat /tmp/globs.txt
 
@@ -189,11 +194,18 @@ jobs:
             --model sonnet
             --effort medium
             --max-turns 20
-            --allowedTools "Read,Edit,Write,Grep,Glob,Bash(npm run *),Bash(npx vitest *)"
+            --allowedTools "Read,Edit,Write,Grep,Glob,Bash"
           prompt: |
             Implement GitHub issue #${{ env.ISSUE }} in this repository.
 
             TITLE: ${{ env.ISSUE_TITLE }}
+
+            The full issue body follows. It contains an `acceptance` code block
+            and a `Files:` line. Both are binding.
+
+            ---
+            ${{ env.ISSUE_BODY }}
+            ---
 
             Read CLAUDE.md first. It is binding.
 
