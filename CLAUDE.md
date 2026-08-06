@@ -3,9 +3,9 @@
 Harness documentation for `strat-egy`. Everything here is verified against files in
 this repo or `gh` output on 2026-08-06. Gaps are marked `TODO: unclear`.
 
-This file documents **the harness**. The binding simulation rules are enforced in
-`eslint.config.js` (banned globals/properties in `src/sim/**`); their earlier prose
-form is in this file's git history.
+See also: **`docs/HARNESS.md`** — the binding rules this harness enforces (layer
+boundaries, determinism rules for `src/sim/**`, agent conduct, settled decisions).
+This file is the machinery; that one is the rules.
 
 ## 1. What this project is
 
@@ -24,7 +24,7 @@ shell gates, and opens a PR. `src/` currently holds only `sim/rng.ts` and `sim/h
 | `.github/workflows/` | `agent.yml`, `ci.yml`, `deadman.yml`, `reset-agent-state.yml` |
 | `.github/ISSUE_TEMPLATE/` | `agent-task.md` — the machine-readable issue format |
 | `.ratchet/` | `test-count.json` |
-| `docs/` | `SPEC.md` — game intent |
+| `docs/` | `SPEC.md` — game intent; `HARNESS.md` — the binding rules |
 | root | `PLAN.md`, `BACKLOG.md`, `eslint.config.js`, `vitest.config.ts`, `tsconfig.json` |
 
 `src/render/` and `src/net/` do not exist yet. `coverage/` is gitignored.
@@ -42,8 +42,8 @@ There is **no build script** and no bundler — `package.json` defines exactly t
 three scripts. Node `>=22`, ESM, `moduleResolution: NodeNext` (relative imports need
 explicit `.js` extensions).
 
-TODO: unclear — `npm run test:sync` and `npm run replay` appear in older docs but are
-not defined in `package.json`.
+TODO: unclear — `npm run test:sync` and `npm run replay` are specified in
+`docs/HARNESS.md` but are not defined in `package.json`.
 
 ## 4. The issue label state machine
 
@@ -131,7 +131,8 @@ In `ci.yml`, on top of typecheck/lint/test:
   for `.skip(`, `.todo(`, `.only(`, `xit(`, `xdescribe(`.
 - **Test-count ratchet** — see §7.
 - **No-op guard** (PRs only) — fails if every changed path is under `docs/` or
-  `.agent/`, ends in `.md`, or matches `lock`.
+  `.agent/`, ends in `.md`, or matches `lock`. One exemption: a PR in which *every*
+  changed file is `.md` passes.
 - **Secret scan** — `gitleaks/gitleaks-action@v2`.
 
 ## 7. The ratchet files
@@ -144,6 +145,6 @@ never fall. `agent.yml`'s prompt forbids the agent from editing `.ratchet/`.
 - TODO: unclear — nothing in the repo updates this file. It has one commit
   (`3b3bb38 bootstrap toolchain`) and the floor is still 1 while `vitest list`
   currently reports 17 tests, so the ratchet is not actually holding a real floor.
-- TODO: unclear — `ci.yml` says the agent "cannot edit it (blocked by a repository
-  ruleset)", but `gh api repos/:owner/:repo/rulesets` returns `[]` and there is no
-  `CODEOWNERS` file. Only Gate 2's `Files:` globs and the prompt appear to constrain it.
+- Nothing platform-side protects the file: `gh api repos/:owner/:repo/rulesets` returns
+  `[]` and there is no `CODEOWNERS`. Only `agent.yml`'s prompt and Gate 2's `Files:`
+  globs keep the agent out of `.ratchet/` — both inside the loop the agent runs in.
