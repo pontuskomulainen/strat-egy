@@ -69,7 +69,12 @@ jobs:
           echo "Clean."
 
       - name: Test-count ratchet
-        # .ratchet/test-count.json is committed and the count may go up, never down.
+        # Half one: the count may never fall below the committed floor.
+        #
+        # This step is the only place tests are counted. It exports the pair so
+        # the next step compares the same numbers rather than counting again -
+        # two counting methods would eventually disagree, and the one that
+        # disagreed quietly would be the one that mattered.
         #
         # NOTE: nothing platform-side protects this file today. There is no
         # repository ruleset (`gh api repos/:owner/:repo/rulesets` returns `[]`)
@@ -81,8 +86,29 @@ jobs:
           FLOOR=$(jq -r '.count' .ratchet/test-count.json)
           ACTUAL=$(npx vitest list 2>/dev/null | grep -c ' > ' || true)
           echo "floor=$FLOOR actual=$ACTUAL"
+          echo "RATCHET_FLOOR=$FLOOR" >> "$GITHUB_ENV"
+          echo "RATCHET_ACTUAL=$ACTUAL" >> "$GITHUB_ENV"
           if [ "$ACTUAL" -lt "$FLOOR" ]; then
             echo "::error::Test count fell from $FLOOR to $ACTUAL"
+            exit 1
+          fi
+
+      - name: Test-count ratchet floor is current
+        # Half two: the floor may not lag behind reality either.
+        #
+        # A floor below the real count is an inert ratchet. This one read
+        # {"count": 1} from the bootstrap commit while 17 tests existed, so 16
+        # tests could have been deleted without CI saying a word. A ratchet that
+        # is not raised is not a ratchet, so tests added without the floor moving
+        # with them is a failure - in the same PR, every time.
+        #
+        # Counts nothing itself. Uses the numbers the step above measured.
+        run: |
+          echo "floor=$RATCHET_FLOOR actual=$RATCHET_ACTUAL"
+          if [ "$RATCHET_ACTUAL" -gt "$RATCHET_FLOOR" ]; then
+            echo "Raise the floor in this PR:"
+            echo "  echo '{\"count\": $RATCHET_ACTUAL}' > .ratchet/test-count.json"
+            echo "::error::Test count rose from $RATCHET_FLOOR to $RATCHET_ACTUAL but the floor was not raised. Set .ratchet/test-count.json to {\"count\": $RATCHET_ACTUAL} in this PR."
             exit 1
           fi
 
@@ -119,3 +145,43 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ github.token }}
+
+      # --- human review gate --------------------------------------------
+
+      - name: frozen paths
+        # tests/**, .ratchet/** and .github/workflows/** are the files that decide
+        # what CI will accept. A change to them cannot be validated by the thing
+        # it changes, so it does not get merged on CI's say-so. Any PR touching
+        # them fails here, deliberately, and a human reads the diff.
+        #
+        # NO EXEMPTIONS. Not by path, not by author, not by label, not for the
+        # PR that introduced this step. An escape hatch here is the whole gate:
+        # anything able to take the hatch is exactly what this is meant to catch.
+        #
+        # Runs last so every real check reports before this one trips - when this
+        # fails you want the rest of the run's verdict already on the page.
+        #
+        # Its own named step, so an auto-merge job can gate on it specifically
+        # (`if: steps.<id>.outcome == 'success'`) rather than on the whole job.
+        if: github.event_name == 'pull_request'
+        env:
+          # The PR base branch, not HEAD~1: a PR is judged as a whole, and the
+          # previous commit is not the thing being merged.
+          BASE: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --quiet origin "+refs/heads/$BASE:refs/remotes/origin/$BASE" || true
+          CHANGED=$(git diff --name-only "origin/$BASE...HEAD")
+          FROZEN=$(printf '%s\n' "$CHANGED" \
+                   | grep -E '^(tests/|\.ratchet/|\.github/workflows/)' || true)
+          if [ -n "$FROZEN" ]; then
+            echo "Frozen paths changed in this PR:"
+            echo "$FROZEN" | sed 's/^/  /'
+            echo
+            echo "This is NOT a code failure. Nothing above is broken and no test"
+            echo "regressed. These paths define what CI is allowed to accept, so a"
+            echo "change to them requires human review before merge. Read the diff,"
+            echo "decide it is what you meant, and merge it yourself."
+            echo "::error::frozen paths changed - NOT a code failure. This PR edits tests/**, .ratchet/** or .github/workflows/**, which decide what CI accepts. It requires human review before merge."
+            exit 1
+          fi
+          echo "No frozen paths touched."
