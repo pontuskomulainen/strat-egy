@@ -76,9 +76,10 @@ issue is blocked on its **fourth** selection, not its third.
 ## 5. The workflows
 
 **`ci.yml` — CI.** Triggers on every `pull_request` and on pushes to `main`. Runs
-`npm ci`, typecheck, lint, tests with coverage, then four anti-gaming checks and a
-`gitleaks` secret scan. Job id `check` — this is the required status check on `main`
-(branch protection: `strict: true`, `enforce_admins: true`, no force pushes).
+`npm ci`, typecheck, lint, tests with coverage, then five anti-gaming checks, a
+`gitleaks` secret scan, and the `frozen paths` review gate. Job id `check` — this is the
+required status check on `main` (branch protection: `strict: true`,
+`enforce_admins: true`, no force pushes).
 
 **`agent.yml` — Agent loop.** Cron `17 23 * * *` UTC plus `workflow_dispatch`;
 `concurrency: agent-loop` with `cancel-in-progress: false`; 25-minute timeout; the
@@ -129,22 +130,35 @@ In `ci.yml`, on top of typecheck/lint/test:
   80%, branches 75%, measured over `src/**/*.ts`.
 - **No skipped or focused tests** (PRs only) — greps changed `*.test.*`/`*.spec.*` files
   for `.skip(`, `.todo(`, `.only(`, `xit(`, `xdescribe(`.
-- **Test-count ratchet** — see §7.
+- **Test-count ratchet** — fails when actual < floor; counts once, exports the pair.
+- **Test-count ratchet floor is current** — fails when actual > floor, naming the value
+  to write. Reuses those numbers, counts nothing. The pair forces floor == actual, so
+  tests and floor move together. See §7.
 - **No-op guard** (PRs only) — fails if every changed path is under `docs/` or
   `.agent/`, ends in `.md`, or matches `lock`. One exemption: a PR in which *every*
   changed file is `.md` passes.
 - **Secret scan** — `gitleaks/gitleaks-action@v2`.
+- **frozen paths** (PRs only, runs last) — fails when the PR changes `tests/**`,
+  `.ratchet/**`, or `.github/workflows/**`, diffed against the PR's base branch
+  (`github.base_ref`), not the previous commit. **Not a code failure**: the PR edits
+  what decides what CI accepts, so a human reads it before merge. **No exemptions** —
+  not by path, author, or label. Last, so other verdicts land first; its own named step
+  so an auto-merge job can gate on it. Note it fails inside `check`, the required status
+  check — with `enforce_admins: true` that blocks the merge button for admins too.
 
 ## 7. The ratchet files
 
-`.ratchet/` contains one file, `test-count.json`, currently `{"count": 1}`. The CI
+`.ratchet/` contains one file, `test-count.json`, currently `{"count": 17}`. The CI
 step reads the floor with `jq -r '.count'` and the actual count with
-`npx vitest list | grep -c ' > '`, and fails when actual < floor. The count may rise,
-never fall. `agent.yml`'s prompt forbids the agent from editing `.ratchet/`.
+`npx vitest list | grep -c ' > '`, and the two ratchet steps fail on either side of it,
+so **floor must equal actual**: delete a test and the first fails, add one without
+raising the floor and the second fails. Raising it is a human edit made in the PR that
+adds the test — and `.ratchet/**` is a frozen path, so that PR gets read by a person.
+`agent.yml`'s prompt forbids the agent from editing `.ratchet/`.
 
-- TODO: unclear — nothing in the repo updates this file. It has one commit
-  (`3b3bb38 bootstrap toolchain`) and the floor is still 1 while `vitest list`
-  currently reports 17 tests, so the ratchet is not actually holding a real floor.
+- Until 2026-08-07 the floor was `{"count": 1}` from the bootstrap commit while
+  `vitest list` reported 17, so the ratchet held nothing — 16 tests could have been
+  deleted without CI noticing. The floor is now 17 and the second step keeps it honest.
 - Nothing platform-side protects the file: `gh api repos/:owner/:repo/rulesets` returns
   `[]` and there is no `CODEOWNERS`. Only `agent.yml`'s prompt and Gate 2's `Files:`
   globs keep the agent out of `.ratchet/` — both inside the loop the agent runs in.
