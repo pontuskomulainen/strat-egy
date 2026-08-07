@@ -69,8 +69,14 @@ jobs:
           echo "Clean."
 
       - name: Test-count ratchet
-        # .ratchet/test-count.json is committed and the agent cannot edit it
-        # (blocked by a repository ruleset). The count may go up, never down.
+        # .ratchet/test-count.json is committed and the count may go up, never down.
+        #
+        # NOTE: nothing platform-side protects this file today. There is no
+        # repository ruleset (`gh api repos/:owner/:repo/rulesets` returns `[]`)
+        # and no CODEOWNERS file. The only things keeping the agent out of
+        # .ratchet/ are agent.yml's prompt, which tells it not to, and Gate 2,
+        # which fails the run if a changed path is outside the issue's `Files:`
+        # globs - both inside the agent's own loop, neither enforced by GitHub.
         run: |
           FLOOR=$(jq -r '.count' .ratchet/test-count.json)
           ACTUAL=$(npx vitest list 2>/dev/null | grep -c ' > ' || true)
@@ -82,8 +88,21 @@ jobs:
 
       - name: No-op guard
         # A PR whose only changes are docs or lockfiles did no work.
+        #
+        # One exemption: a PR in which EVERY changed file is `.md` is documentation
+        # as the deliverable, not documentation as filler, so it passes. The
+        # exemption is all-or-nothing and applies to no other extension - one
+        # non-.md file and the original rule below decides, unchanged. So a
+        # lockfile bump, a `docs/foo.txt`, or a `.md` smuggled in beside a
+        # lockfile all still fail exactly as before.
         if: github.event_name == 'pull_request'
         run: |
+          CHANGED=$(git diff --name-only origin/main...HEAD)
+          NON_MD=$(printf '%s\n' "$CHANGED" | grep -v '\.md$' || true)
+          if [ -n "$CHANGED" ] && [ -z "$NON_MD" ]; then
+            echo "Documentation-only PR - every changed file is .md."
+            exit 0
+          fi
           REAL=$(git diff --name-only origin/main...HEAD \
                  | grep -vE '^(docs/|\.agent/)|\.md$|lock' | wc -l)
           if [ "$REAL" -eq 0 ]; then
